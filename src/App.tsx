@@ -1,4 +1,28 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+
+// ============================================================
+// LOCALSTORAGE PERSISTENCE
+// ============================================================
+function usePersistedState<T>(key: string, defaultValue: T) {
+  const [state, setState] = useState<T>(() => {
+    try {
+      const saved = localStorage.getItem(key);
+      return saved !== null ? JSON.parse(saved) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  });
+
+  const setPersistedState = useCallback((value: T | ((prev: T) => T)) => {
+    setState(prev => {
+      const next = typeof value === "function" ? (value as (prev: T) => T)(prev) : value;
+      try { localStorage.setItem(key, JSON.stringify(next)); } catch (_e) { /* ignore */ }
+      return next;
+    });
+  }, [key]);
+
+  return [state, setPersistedState] as const;
+}
 import Icon from "@/components/ui/icon";
 
 // ============================================================
@@ -99,26 +123,34 @@ function SlotsPage({ inventory, onInventoryChange }: {
   inventory: Prize[];
   onInventoryChange: (v: Prize[]) => void;
 }) {
-  const [reels, setReels] = useState(["🍒", "💎", "7️⃣"]);
+  const [reels, setReels] = usePersistedState<string[]>("rj_reels", ["🍒", "💎", "7️⃣"]);
   const [spinning, setSpinning] = useState([false, false, false]);
-  const [spinsLeft, setSpinsLeft] = useState(2);
-  const [nextSpinTime, setNextSpinTime] = useState(5 * 60 * 60);
+  const [spinsLeft, setSpinsLeft] = usePersistedState<number>("rj_spins_left", 2);
+  const [spinHistory, setSpinHistory] = usePersistedState<string[]>("rj_spin_history", []);
   const [lastWin, setLastWin] = useState<Prize | null>(null);
   const [showWin, setShowWin] = useState(false);
-  const [spinHistory, setSpinHistory] = useState<string[]>([]);
+
+  // Сохраняем момент последнего обнуления таймера
+  const [spinRefillAt, setSpinRefillAt] = usePersistedState<number>(
+    "rj_spin_refill_at",
+    Date.now() + 5 * 60 * 60 * 1000
+  );
+  const [nextSpinTime, setNextSpinTime] = useState(() =>
+    Math.max(0, Math.round((spinRefillAt - Date.now()) / 1000))
+  );
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setNextSpinTime(t => {
-        if (t <= 1) {
-          setSpinsLeft(prev => Math.min(prev + 2, 10));
-          return 5 * 60 * 60;
-        }
-        return t - 1;
-      });
+      const remaining = Math.max(0, Math.round((spinRefillAt - Date.now()) / 1000));
+      setNextSpinTime(remaining);
+      if (remaining <= 0) {
+        setSpinsLeft(prev => Math.min(prev + 2, 10));
+        const next = Date.now() + 5 * 60 * 60 * 1000;
+        setSpinRefillAt(next);
+      }
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [spinRefillAt]);
 
   const spin = useCallback(() => {
     if (spinsLeft <= 0 || spinning.some(s => s)) return;
@@ -256,7 +288,7 @@ function AuctionPage({ coins, onCoinsChange, inventory, onInventoryChange }: {
   inventory: Prize[];
   onInventoryChange: (v: Prize[]) => void;
 }) {
-  const [lots, setLots] = useState<AuctionLot[]>(INITIAL_AUCTION);
+  const [lots, setLots] = usePersistedState<AuctionLot[]>("rj_auction_lots", INITIAL_AUCTION);
   const [bidAmounts, setBidAmounts] = useState<Record<string, number>>({});
   const [showSellModal, setShowSellModal] = useState(false);
   const [selectedPrize, setSelectedPrize] = useState<Prize | null>(null);
@@ -711,9 +743,9 @@ function MenuPage({ onNavigate }: { onNavigate: (p: Page) => void }) {
 // ROOT APP
 // ============================================================
 export default function App() {
-  const [page, setPage] = useState<Page>("menu");
-  const [coins, setCoins] = useState(2500);
-  const [inventory, setInventory] = useState<Prize[]>([]);
+  const [page, setPage] = usePersistedState<Page>("rj_page", "menu");
+  const [coins, setCoins] = usePersistedState<number>("rj_coins", 2500);
+  const [inventory, setInventory] = usePersistedState<Prize[]>("rj_inventory", []);
 
   const NAV_ITEMS: { page: Page; icon: string; label: string }[] = [
     { page: "menu", icon: "Home", label: "Меню" },
