@@ -26,6 +26,137 @@ function usePersistedState<T>(key: string, defaultValue: T) {
 import Icon from "@/components/ui/icon";
 
 // ============================================================
+// API
+// ============================================================
+const GOOGLE_AUTH_URL = "https://functions.poehali.dev/bb065b3c-3a26-4ba4-bc3b-3dd311d53a0c";
+const PLAYER_DATA_URL = "https://functions.poehali.dev/86df8212-6ca5-42ec-8616-c89c4c78560f";
+
+const GOOGLE_CLIENT_ID = (window as Record<string, unknown>).__GOOGLE_CLIENT_ID__ as string || import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+
+interface Session {
+  player_id: number;
+  session_token: string;
+  name: string;
+  email: string;
+  avatar: string;
+}
+
+function getSession(): Session | null {
+  try {
+    const s = localStorage.getItem("rj_session");
+    return s ? JSON.parse(s) : null;
+  } catch { return null; }
+}
+
+function saveSession(s: Session) {
+  localStorage.setItem("rj_session", JSON.stringify(s));
+}
+
+function clearSession() {
+  localStorage.removeItem("rj_session");
+}
+
+async function apiGoogleAuth(token: string): Promise<Session> {
+  const res = await fetch(GOOGLE_AUTH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Auth failed");
+  return data as Session;
+}
+
+async function apiLoadPlayer(session: Session) {
+  const res = await fetch(PLAYER_DATA_URL, {
+    headers: { "X-Player-Id": String(session.player_id), "X-Session-Token": session.session_token },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function apiSavePlayer(session: Session, data: Record<string, unknown>) {
+  await fetch(PLAYER_DATA_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Player-Id": String(session.player_id), "X-Session-Token": session.session_token },
+    body: JSON.stringify(data),
+  });
+}
+
+// ============================================================
+// GOOGLE LOGIN SCREEN
+// ============================================================
+function LoginScreen({ onLogin }: { onLogin: (session: Session) => void }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const btnRef = useRef<HTMLDivElement>(null);
+  const noClientId = !GOOGLE_CLIENT_ID;
+
+  useEffect(() => {
+    if (noClientId || !btnRef.current) return;
+    const g = (window as Record<string, unknown>).google as { accounts: { id: { initialize: (o: unknown) => void; renderButton: (el: HTMLElement, o: unknown) => void } } } | undefined;
+    if (!g) return;
+
+    g.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: async (response: { credential: string }) => {
+        setLoading(true);
+        setError("");
+        try {
+          const session = await apiGoogleAuth(response.credential);
+          saveSession(session);
+          onLogin(session);
+        } catch (e: unknown) {
+          setError(e instanceof Error ? e.message : "Ошибка входа");
+        } finally {
+          setLoading(false);
+        }
+      },
+    });
+
+    g.accounts.id.renderButton(btnRef.current, {
+      theme: "filled_black",
+      size: "large",
+      shape: "pill",
+      width: 280,
+      text: "signin_with",
+      locale: "ru",
+    });
+  }, [noClientId, onLogin]);
+
+  return (
+    <div className="min-h-screen bg-[#0d0d0d] flex flex-col items-center justify-center px-6">
+      <div className="text-center mb-10 animate-fade-in-up">
+        <div className="text-7xl mb-4 animate-float">👑</div>
+        <h1 className="text-5xl font-playfair font-black gold-text mb-2">Royal Jackpot</h1>
+        <div className="divider-gold mx-10 my-3" />
+        <p className="font-cormorant italic text-muted-foreground text-xl">Казино. Аукцион. Трофеи.</p>
+      </div>
+
+      <div className="casino-card rounded-3xl p-8 w-full max-w-sm border border-yellow-800/30 animate-scale-in text-center">
+        <h2 className="font-playfair text-2xl text-yellow-300 mb-2">Добро пожаловать</h2>
+        <p className="font-cormorant italic text-muted-foreground mb-6">Войдите, чтобы ваш прогресс сохранялся</p>
+
+        {noClientId ? (
+          <div className="bg-yellow-950/40 border border-yellow-700/40 rounded-xl p-4 text-yellow-400 text-sm font-oswald">
+            ⚠️ Добавьте GOOGLE_CLIENT_ID в секреты проекта для активации входа
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-4">
+            <div ref={btnRef} />
+            {loading && <p className="text-muted-foreground font-oswald text-sm animate-pulse">Входим...</p>}
+            {error && <p className="text-red-400 font-oswald text-sm">{error}</p>}
+          </div>
+        )}
+
+        <div className="divider-gold my-4" />
+        <p className="text-[10px] font-oswald tracking-widest text-muted-foreground/40 uppercase">♠ ♥ ♦ ♣ ♦ ♥ ♠</p>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // TYPES
 // ============================================================
 type Page = "menu" | "slots" | "auction" | "shop" | "profile" | "info";
@@ -117,11 +248,13 @@ function getPrizeFromSymbols(s1: string, s2: string, s3: string): Prize | null {
 // ============================================================
 // SLOT MACHINE
 // ============================================================
-function SlotsPage({ inventory, onInventoryChange }: {
+function SlotsPage({ inventory, onInventoryChange, session, onSave }: {
   coins: number;
   onCoinsChange: (v: number) => void;
   inventory: Prize[];
   onInventoryChange: (v: Prize[]) => void;
+  session: Session;
+  onSave: (s: Session, d: Record<string, unknown>) => void;
 }) {
   const [reels, setReels] = usePersistedState<string[]>("rj_reels", ["🍒", "💎", "7️⃣"]);
   const [spinning, setSpinning] = useState([false, false, false]);
@@ -169,16 +302,26 @@ function SlotsPage({ inventory, onInventoryChange }: {
       setSpinning([false, false, false]);
       setReels(results);
       const prize = getPrizeFromSymbols(results[0], results[1], results[2]);
+      const newSpinsLeft = spinsLeft - 1;
       if (prize) {
         setLastWin(prize);
         setShowWin(true);
-        onInventoryChange([...inventory, { ...prize, id: `${prize.id}-${Date.now()}` }]);
-        setSpinHistory(h => [`🏆 Выиграл: ${prize.emoji} ${prize.name}`, ...h.slice(0, 4)]);
+        const newInventory = [...inventory, { ...prize, id: `${prize.id}-${Date.now()}` }];
+        onInventoryChange(newInventory);
+        setSpinHistory(h => {
+          const next = [`🏆 Выиграл: ${prize.emoji} ${prize.name}`, ...h.slice(0, 4)];
+          onSave(session, { spins_left: newSpinsLeft, spin_history: next, inventory: newInventory });
+          return next;
+        });
       } else {
-        setSpinHistory(h => [`${results[0]} ${results[1]} ${results[2]} — нет совпадений`, ...h.slice(0, 4)]);
+        setSpinHistory(h => {
+          const next = [`${results[0]} ${results[1]} ${results[2]} — нет совпадений`, ...h.slice(0, 4)];
+          onSave(session, { spins_left: newSpinsLeft, spin_history: next });
+          return next;
+        });
       }
     }, 1400);
-  }, [spinsLeft, spinning, inventory, onInventoryChange]);
+  }, [spinsLeft, spinning, inventory, onInventoryChange, session, onSave]);
 
   return (
     <div className="flex flex-col items-center gap-6 py-4 animate-fade-in-up">
@@ -462,14 +605,23 @@ function AuctionPage({ coins, onCoinsChange, inventory, onInventoryChange }: {
 // ============================================================
 // SHOP PAGE
 // ============================================================
-function ShopPage({ coins, onCoinsChange }: { coins: number; onCoinsChange: (v: number) => void }) {
-  const [purchased, setPurchased] = useState<Set<string>>(new Set());
+function ShopPage({ coins, onCoinsChange, session, onSave }: {
+  coins: number;
+  onCoinsChange: (v: number) => void;
+  session: Session;
+  onSave: (s: Session, d: Record<string, unknown>) => void;
+}) {
+  const [purchased, setPurchased] = usePersistedState<string[]>("rj_purchased", []);
+  const purchasedSet = new Set(purchased);
   const [feedback, setFeedback] = useState("");
 
   const buy = (item: ShopItem) => {
-    if (coins < item.price || purchased.has(item.id)) return;
-    onCoinsChange(coins - item.price);
-    setPurchased(p => new Set([...p, item.id]));
+    if (coins < item.price || purchasedSet.has(item.id)) return;
+    const newCoins = coins - item.price;
+    onCoinsChange(newCoins);
+    const next = [...purchased, item.id];
+    setPurchased(next);
+    onSave(session, { coins: newCoins, purchased_items: next });
     setFeedback(`✓ Куплено: ${item.name}`);
     setTimeout(() => setFeedback(""), 3000);
   };
@@ -492,7 +644,7 @@ function ShopPage({ coins, onCoinsChange }: { coins: number; onCoinsChange: (v: 
 
       <div className="flex flex-col gap-4">
         {SHOP_ITEMS.map((item, idx) => {
-          const owned = purchased.has(item.id);
+          const owned = purchasedSet.has(item.id);
           const canAfford = coins >= item.price;
           return (
             <div key={item.id} className="casino-card rounded-2xl p-4 flex items-center gap-4" style={{ animationDelay: `${idx * 0.08}s` }}>
@@ -526,7 +678,7 @@ function ShopPage({ coins, onCoinsChange }: { coins: number; onCoinsChange: (v: 
 // ============================================================
 // PROFILE PAGE
 // ============================================================
-function ProfilePage({ coins, inventory }: { coins: number; inventory: Prize[] }) {
+function ProfilePage({ coins, inventory, session }: { coins: number; inventory: Prize[]; session: Session }) {
   const stats = { spins: 47, wins: 12, auctionWins: 3, level: 7, xp: 680, nextXp: 1000 };
 
   const grouped = {
@@ -541,11 +693,13 @@ function ProfilePage({ coins, inventory }: { coins: number; inventory: Prize[] }
       <div className="casino-card rounded-3xl p-6 text-center relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-b from-red-950/20 to-transparent pointer-events-none" />
         <div className="relative">
-          <div className="w-20 h-20 rounded-full bg-[#1a1a1a] border-2 border-yellow-800 mx-auto mb-3 flex items-center justify-center text-4xl animate-float">
-            🎭
+          <div className="w-20 h-20 rounded-full bg-[#1a1a1a] border-2 border-yellow-800 mx-auto mb-3 overflow-hidden flex items-center justify-center animate-float">
+            {session.avatar
+              ? <img src={session.avatar} alt={session.name} className="w-full h-full object-cover" />
+              : <span className="text-4xl">🎭</span>}
           </div>
-          <h2 className="font-playfair text-2xl font-bold text-yellow-300">Игрок #1774</h2>
-          <p className="font-cormorant italic text-muted-foreground">Азартный охотник за призами</p>
+          <h2 className="font-playfair text-2xl font-bold text-yellow-300">{session.name || "Игрок"}</h2>
+          <p className="font-cormorant italic text-muted-foreground">{session.email}</p>
           <div className="divider-gold my-3" />
           <div className="flex justify-center gap-6">
             <div>
@@ -743,9 +897,61 @@ function MenuPage({ onNavigate }: { onNavigate: (p: Page) => void }) {
 // ROOT APP
 // ============================================================
 export default function App() {
+  const [session, setSession] = useState<Session | null>(() => getSession());
   const [page, setPage] = usePersistedState<Page>("rj_page", "menu");
   const [coins, setCoins] = usePersistedState<number>("rj_coins", 2500);
   const [inventory, setInventory] = usePersistedState<Prize[]>("rj_inventory", []);
+  const [loadingData, setLoadingData] = useState(false);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Загружаем данные с сервера после логина
+  const loadPlayerData = useCallback(async (s: Session) => {
+    setLoadingData(true);
+    try {
+      const data = await apiLoadPlayer(s);
+      if (data) {
+        setCoins(data.coins ?? 2500);
+        setInventory(data.inventory ?? []);
+        localStorage.setItem("rj_spins_left", JSON.stringify(data.spins_left ?? 2));
+        localStorage.setItem("rj_spin_refill_at", JSON.stringify(data.spin_refill_at ?? Date.now() + 5 * 60 * 60 * 1000));
+        localStorage.setItem("rj_spin_history", JSON.stringify(data.spin_history ?? []));
+        localStorage.setItem("rj_purchased", JSON.stringify(data.purchased_items ?? []));
+      }
+    } finally {
+      setLoadingData(false);
+    }
+  }, [setCoins, setInventory]);
+
+  // При старте — если сессия есть, грузим данные
+  useEffect(() => {
+    if (session) loadPlayerData(session);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Debounced сохранение на сервер при любом изменении
+  const scheduleSave = useCallback((s: Session, data: Record<string, unknown>) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => apiSavePlayer(s, data), 2000);
+  }, []);
+
+  const handleCoinsChange = useCallback((v: number) => {
+    setCoins(v);
+    if (session) scheduleSave(session, { coins: v });
+  }, [session, setCoins, scheduleSave]);
+
+  const handleInventoryChange = useCallback((v: Prize[]) => {
+    setInventory(v);
+    if (session) scheduleSave(session, { inventory: v });
+  }, [session, setInventory, scheduleSave]);
+
+  const handleLogin = useCallback((s: Session) => {
+    setSession(s);
+    loadPlayerData(s);
+  }, [loadPlayerData]);
+
+  const handleLogout = useCallback(() => {
+    clearSession();
+    setSession(null);
+  }, []);
 
   const NAV_ITEMS: { page: Page; icon: string; label: string }[] = [
     { page: "menu", icon: "Home", label: "Меню" },
@@ -755,6 +961,15 @@ export default function App() {
     { page: "profile", icon: "User", label: "Профиль" },
   ];
 
+  if (!session) return <LoginScreen onLogin={handleLogin} />;
+
+  if (loadingData) return (
+    <div className="min-h-screen bg-[#0d0d0d] flex flex-col items-center justify-center gap-4">
+      <div className="text-5xl animate-float">👑</div>
+      <p className="font-playfair text-xl gold-text animate-pulse">Загружаем ваш профиль...</p>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-[#0d0d0d] flex flex-col">
       {/* Top Bar */}
@@ -763,9 +978,20 @@ export default function App() {
           <button onClick={() => setPage("menu")} className="font-playfair font-bold text-lg gold-text">
             👑 Royal Jackpot
           </button>
-          <div className="casino-card rounded-full px-4 py-1.5 flex items-center gap-1.5">
-            <span className="text-base">💰</span>
-            <span className="font-oswald font-semibold text-yellow-300 text-sm">{coins.toLocaleString()}</span>
+          <div className="flex items-center gap-2">
+            <div className="casino-card rounded-full px-4 py-1.5 flex items-center gap-1.5">
+              <span className="text-base">💰</span>
+              <span className="font-oswald font-semibold text-yellow-300 text-sm">{coins.toLocaleString()}</span>
+            </div>
+            {session.avatar ? (
+              <button onClick={handleLogout} title="Выйти">
+                <img src={session.avatar} alt={session.name} className="w-8 h-8 rounded-full border border-yellow-800/50" />
+              </button>
+            ) : (
+              <button onClick={handleLogout} className="w-8 h-8 rounded-full bg-[#1a1a1a] border border-yellow-800/50 flex items-center justify-center">
+                <Icon name="User" size={14} className="text-yellow-600" />
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -773,10 +999,10 @@ export default function App() {
       {/* Content */}
       <main className="flex-1 max-w-md mx-auto w-full px-4 pb-24 overflow-y-auto">
         {page === "menu" && <MenuPage onNavigate={setPage} />}
-        {page === "slots" && <SlotsPage coins={coins} onCoinsChange={setCoins} inventory={inventory} onInventoryChange={setInventory} />}
-        {page === "auction" && <AuctionPage coins={coins} onCoinsChange={setCoins} inventory={inventory} onInventoryChange={setInventory} />}
-        {page === "shop" && <ShopPage coins={coins} onCoinsChange={setCoins} />}
-        {page === "profile" && <ProfilePage coins={coins} inventory={inventory} />}
+        {page === "slots" && <SlotsPage coins={coins} onCoinsChange={handleCoinsChange} inventory={inventory} onInventoryChange={handleInventoryChange} session={session} onSave={scheduleSave} />}
+        {page === "auction" && <AuctionPage coins={coins} onCoinsChange={handleCoinsChange} inventory={inventory} onInventoryChange={handleInventoryChange} />}
+        {page === "shop" && <ShopPage coins={coins} onCoinsChange={handleCoinsChange} session={session} onSave={scheduleSave} />}
+        {page === "profile" && <ProfilePage coins={coins} inventory={inventory} session={session} />}
         {page === "info" && <InfoPage />}
       </main>
 
